@@ -1,0 +1,5 @@
+name,url
+Example domain,https://example.com/
+Misleading brand (offline fixture),https://paypal.com.account-check.test/start
+Plain HTTP (offline fixture),http://example.net/
+Invalid input,javascript:alert(1)

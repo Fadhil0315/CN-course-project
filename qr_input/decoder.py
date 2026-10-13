@@ -9,6 +9,8 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from qr_structure import inspect_symbol
+
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_IMAGE_PIXELS = 16_000_000
 SUPPORTED_FORMATS = frozenset({"PNG", "JPEG", "WEBP"})
@@ -99,17 +101,51 @@ def decode_qr(image_bytes: bytes) -> dict:
         )
 
     decoded_candidates: list[tuple[str, str]] = []
+    structure = None
     detector = cv2.QRCodeDetector()
     try:
-        for preprocessing, candidate in variants:
-            detected, corners = detector.detectMulti(candidate)
-            if detected and corners is not None and len(corners) > 1:
-                raise QRInputError(
-                    "MULTIPLE_QR_CODES", "Upload an image containing only one QR code."
-                )
-            decoded, _, _ = detector.detectAndDecode(candidate)
-            if decoded:
-                decoded_candidates.append((preprocessing, decoded))
+        # Most symbols need only the scale/threshold passes. Some otherwise
+        # clean rotations fail OpenCV's finder ordering; try three right-angle
+        # orientations only if the normal passes fail, still under the worker deadline.
+        for attempt in range(2):
+            if attempt == 1:
+                if decoded_candidates:
+                    break
+                variants = []
+                for turns in (1, 2, 3):
+                    rotated = np.ascontiguousarray(np.rot90(gray, turns))
+                    variants.append((f"rotation_{turns * 90}", rotated))
+                    if min(rotated.shape) >= 100:
+                        variants.append(
+                            (
+                                f"rotation_{turns * 90}_reduced",
+                                cv2.resize(
+                                    rotated, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA
+                                ),
+                            )
+                        )
+            for preprocessing, candidate in variants:
+                detected, corners = detector.detectMulti(candidate)
+                if detected and corners is not None and len(corners) > 1:
+                    raise QRInputError(
+                        "MULTIPLE_QR_CODES", "Upload an image containing only one QR code."
+                    )
+                decoded, points, straight = detector.detectAndDecode(candidate)
+                if decoded:
+                    decoded_candidates.append((preprocessing, decoded))
+                    if structure is None:
+                        try:
+                            structure = inspect_symbol(straight, points, candidate, decoded)
+                            structure["measurement_frame"] = {
+                                "preprocessing": preprocessing,
+                                "width": candidate.shape[1],
+                                "height": candidate.shape[0],
+                            }
+                        except (ValueError, cv2.error, OverflowError):
+                            structure = {
+                                "available": False,
+                                "note": "The QR decoded, but structural measurements were unavailable.",
+                            }
     except cv2.error as exc:
         raise QRInputError("QR_DECODE_FAILED", "The QR image could not be processed.") from exc
     except UnicodeDecodeError as exc:
@@ -132,4 +168,5 @@ def decode_qr(image_bytes: bytes) -> dict:
         "width": width,
         "height": height,
         "preprocessing": preprocessing,
+        "structure": structure,
     }

@@ -45,6 +45,12 @@ def test_decodes_clean_qr_with_scale_sensitive_finder_pattern():
     assert result["payload"] == payload
 
 
+def test_rotated_scale_sensitive_fixture_decodes():
+    payload = "https://paypal.com.account-check.test/start"
+    result = decode_qr(image_bytes(make_qr(payload).rotate(90, expand=True)))
+    assert result["payload"] == payload
+
+
 def test_two_qr_codes_are_ambiguous():
     left = make_qr("https://example.com/one")
     right = make_qr("https://example.com/two")

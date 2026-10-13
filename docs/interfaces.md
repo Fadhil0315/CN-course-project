@@ -1,44 +1,44 @@
-# Integration contract — version 1
+# Public interfaces and report contract
 
-This document and `shared/contracts.py` define the boundary between Fadhil and Charan. Results contain only JSON-compatible primitives. Extra observation fields may be added; changing required fields or signatures requires agreement by both owners.
+The application is organized by module. All results contain JSON-compatible primitives; finite scores and nested values are validated by `shared/contracts.py`.
 
-## Public functions
+## Entry points
 
 ```python
-# Fadhil
+scan_runner.scan(kind, payload, *, timeout=60, **options) -> dict
+batch.analyze_batch(items, *, workers=2, progress=None, **options) -> list[dict]
+pipeline.analyze_url_input(url, *, live=False, approved_hosts=..., **options) -> dict
+pipeline.analyze_image(image_bytes, *, live=False, approved_hosts=..., **options) -> dict
+pipeline.run_demo(case_id) -> dict
+```
+
+Use `scan` for untrusted interactive input: it isolates work in a spawned process and terminates it after the deadline. Input kinds: url, image, camera, demo. Options: expected_domain, include_geolocation, expected_asns, expected_countries, lexical_model. The direct pipeline functions are useful for injected-dependency testing.
+
+Batch items contain kind, payload and name. Results contain stable id, name, reused_duplicate and report. Exceptions affect only that item. The progress callback receives completed count and total. Batch results retain input order; export/UI summaries sort by score without changing IDs.
+
+## Analysis modules
+
+```python
 qr_input.decode_qr(image_bytes: bytes) -> dict
 url_analysis.normalize_url(value: str) -> str
 url_analysis.analyze_url(url: str) -> dict
-redirect_analysis.trace_redirects(url: str, *, policy=None, resolver=None, transport=None) -> dict
-
-# Charan supplies these exact import paths
-network_analysis.analyzer.analyze_network(hops: list[dict]) -> dict
-scoring.engine.calculate_risk(layers: dict[str, dict]) -> dict
+redirect_analysis.trace_redirects(url, *, policy=None, resolver=None, transport=None) -> dict
+network_analysis.analyzer.analyze_network(hops, **collector_options) -> dict
+qr_structure.analyze_structure(metadata) -> dict
+scoring.engine.calculate_risk(layers) -> dict
 ```
 
-No UI imports, printing-only outputs, application launch, or network calls at module-import time. The pipeline discovers Charan's functions via these import paths. Missing modules produce explicit pending results; malformed or failing modules produce unavailable/error results. Offline and synthetic modes never call the network provider.
+No module launches the UI or contacts networks at import time. Offline/synthetic execution never calls live collectors. Invalid or failing network/scoring results are converted into explicit errors.
 
 ## Redirect hop
 
-```json
-{
-  "index": 0,
-  "url": "https://example.com/start",
-  "scheme": "https",
-  "hostname": "example.com",
-  "port": 443,
-  "status_code": 302,
-  "next_url": "https://example.com/end",
-  "error": null,
-  "network_eligible": true
-}
-```
+Fields: index (nonnegative integer), normalized url, scheme, hostname, port, status_code (integer or null), next_url (string or null), error (ErrorRecord or null), network_eligible (boolean).
 
-`status_code` and `next_url` may be null. `error` is null or an ErrorRecord. The tracer returns the hop list inside `observations.hops`. Partial chains remain usable evidence; they are not complete assessments. Charan receives the discovered chain without repeating HTTP redirect discovery.
-
-`network_eligible` is true only after exact-host/port policy and all DNS-address checks pass. The pipeline passes only those hops to Charan, preserving original indices. This includes a vetted host whose TLS connection failed before HTTP headers arrived, but excludes blocked/unrequested targets. Charan inspects each supplied `url`/`hostname`, never follows `next_url`, and must independently revalidate fresh DNS answers before connecting. The flag is not a permanent authorization. Incomplete redirect coverage still forces an incomplete final assessment.
+The tracer records even blocked/failed destinations so the report can explain where it stopped. Only network_eligible hops reach network analysis, preserving indices. The marker is set after exact-host/port and **all-address** DNS checks. The collector independently validates fresh DNS answers before any connection and does not follow next_url.
 
 ## LayerResult
+
+Every layer returns:
 
 ```json
 {
@@ -46,57 +46,41 @@ No UI imports, printing-only outputs, application launch, or network calls at mo
   "score": 0.25,
   "evidence_source": "live",
   "findings": [
-    {
-      "code": "EXAMPLE_RULE",
-      "severity": "warning",
-      "message": "A human-readable explanation",
-      "hop_index": 0,
-      "details": {}
-    }
+    {"code": "EXAMPLE", "severity": "warning", "message": "Explanation",
+     "hop_index": 0, "details": {"score_contribution": 0.25}}
   ],
   "observations": {},
   "errors": []
 }
 ```
 
-- Status: `complete`, `partial`, `unavailable`, `not_implemented`.
-- Score: finite 0–1; null when unavailable/not implemented. A complete layer must have a score.
-- Evidence source: `live`, `recorded`, `synthetic`. For lexical analysis, `live` means calculated from the current input; it does **not** mean a network request occurred. Report `mode` records offline/live/synthetic execution.
-- Finding severity: `info`, `warning`, `high`.
-- ErrorRecord: `{"code": "TIMEOUT", "message": "...", "hop_index": 0}`. Non-hop-specific indices are null.
-- Observations hold raw measurements, not just rule explanations. Unknown values are null.
+Status is complete, partial, unavailable, or legacy not_implemented. A complete layer needs a finite 0–1 score; unavailable/not_implemented must use null. Evidence source is live, recorded or synthetic. Locally calculated URL/QR measurements use live as current input evidence, even when report mode is offline. Report mode always identifies whether network requests were enabled.
 
-Network observations must contain `hops`, each with `hop_index`, `hostname`, `dns`, `tls`, and `asn`. Each section includes its own status and available measurements. DNS: addresses, record types, observed TTLs. TLS: issuer, validity dates, hostname match, validation outcome. ASN: IP-to-ASN/organization mapping and lookup source. TLS is `not_applicable` for HTTP. This per-check status is distinct from the overall LayerResult status.
+Findings need code/message, severity info/warning/high, hop_index null or nonnegative integer, and details. ErrorRecord is `{"code": "...", "message": "...", "hop_index": null}`. Observations contain measurements independently of rule explanations.
 
-## Composite scoring input and output
+Network observations contain hops, each with hop_index, hostname, dns, tls, asn and geolocation. Each check reports its own status and errors. DNS includes addresses and A/AAAA records with observed TTL. TLS includes validation outcome and available certificate/connection metadata; HTTP is not_applicable. ASN includes per-IP mappings with provider provenance and registry country. Optional geolocation is approximate and explicitly separate from registry country. Failed requested geolocation makes network coverage partial.
 
-Input keys: `lexical`, `redirect`, `network`, `qr_structure`, each holding a LayerResult.
+QR metadata includes structural and quality measurements from the decoder's rectified matrix. Coordinates refer to the declared preprocessing frame, which can differ from original image dimensions/orientation. Images themselves are never embedded in JSON.
 
-Provisional weights: 0.20, 0.25, 0.50, 0.05 respectively. QR structure is not implemented in Review 2. Never give absent evidence a zero-risk score.
+## Risk result
 
-Output requires:
+Input keys: lexical, redirect, network, qr_structure. Weights: .20, .25, .50, .05.
 
-```json
-{
-  "score": null,
-  "verdict": "insufficient_evidence",
-  "assessment_status": "incomplete",
-  "completed_weight": 0.45,
-  "excluded_layers": ["network", "qr_structure"],
-  "layer_contributions": {},
-  "explanations": [],
-  "limitations": ["Network analysis and scoring are pending."]
-}
-```
+Required output fields: score (null or 0–100), verdict, assessment_status, completed_weight, excluded_layers, layer_contributions, explanations and limitations. Additional weights and thresholds document the calculation.
 
-- `score`: null or finite 0–100.
-- `completed_weight`: sum of original weights for complete layers only; not confidence or probability.
-- If any of lexical/redirect/network is not complete, verdict must be `insufficient_evidence` and assessment_status must be `incomplete`, even if a provisional score can be calculated.
-- When all three core layers are complete, assessment_status may be `complete_for_r2`; QR structure remains listed as excluded.
-- Normalize the weighted sum by the weights of layers with non-null scores. With three complete core layers and QR structure absent, divide by 0.95. List partial layers in limitations.
-- Bands for complete core evidence: score <35 `low_observed_risk`, 35–<70 `suspicious`, >=70 `high_risk`.
-- Include per-layer weights/sub-scores/contributions and explain exclusions. These are provisional heuristics, not detection probabilities.
+- Any incomplete core lexical/redirect/network layer yields insufficient_evidence and incomplete.
+- All core layers plus QR structure complete yields complete.
+- All core layers complete with structure absent/partial yields complete_for_url, with the structure status/exclusion preserved.
+- A malformed/non-URL input has no risk score.
+- Available scores are renormalized by their available weight sum. Partial layer scores may contribute only to a provisional assessment.
+- completed_weight sums original weights of complete layers; it is coverage, not probability.
+- Low observed risk: score <35; suspicious: 35–<70; high risk: >=70.
+- Contributions contain original weight, normalized weight, sub-score, points and layer status.
 
-## Outer report (Fadhil)
+Legacy complete_for_r2 is still accepted at the validation boundary for old test/provider contracts; current scoring does not emit it.
 
-Contains schema_version, created_at (UTC ISO timestamp), input (kind/url), mode, qr decoder metadata or null, layers, risk, and top-level errors. Demo reports also contain demo metadata. No raw image bytes appear in JSON. The UI stores this report in session state; rerendering the UI does not repeat network analysis.
+## Outer report
+
+schema_version (1), created_at (UTC ISO), input (kind/url and optional filename/expected_domain), mode (offline/live/synthetic), qr metadata or null, layers, risk and errors. Isolated scans add elapsed_seconds. Demos add id/title/description. An optional experimental_ml result is separate from the weighted risk calculation.
+
+Export uses strict finite JSON. CSV summaries escape leading spreadsheet formula characters in untrusted string cells. No raw image/camera bytes or executable model objects are exported.

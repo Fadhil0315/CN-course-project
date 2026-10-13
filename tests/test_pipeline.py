@@ -26,23 +26,24 @@ def test_uploaded_qr_flows_to_lexical_without_live_requests():
     assert report["qr"]["payload"] == "https://example.com/"
     assert report["layers"]["lexical"]["status"] == "complete"
     assert report["layers"]["redirect"]["status"] == "unavailable"
-    assert report["layers"]["network"]["status"] == "not_implemented"
-    assert report["risk"]["score"] is None
-    assert report["risk"]["completed_weight"] == 0.2
+    assert report["layers"]["network"]["status"] == "unavailable"
+    assert report["risk"]["score"] == 0
+    assert report["risk"]["verdict"] == "insufficient_evidence"
+    assert report["risk"]["completed_weight"] == 0.25
     json.dumps(report, allow_nan=False)
 
 
 @pytest.mark.parametrize("case_id", ["ordinary", "suspicious", "loop"])
-def test_demos_decode_real_qr_and_never_invent_network_results(case_id):
+def test_demos_decode_real_qr_and_explicitly_label_network_fixtures(case_id):
     report = pipeline.run_demo(case_id)
     assert report["qr"]["payload"] == report["input"]["url"]
     assert report["mode"] == "synthetic"
     for result in report["layers"].values():
         validate_layer_result(result)
         assert result["evidence_source"] == "synthetic"
-    assert report["layers"]["network"]["status"] == "not_implemented"
-    assert report["risk"]["score"] is None
-    assert report["risk"]["verdict"] == "insufficient_evidence"
+    assert report["layers"]["network"]["status"] == "complete"
+    assert report["risk"]["score"] is not None
+    assert (report["risk"]["verdict"] == "insufficient_evidence") == (case_id == "loop")
     expected = "partial" if case_id == "loop" else "complete"
     assert report["layers"]["redirect"]["status"] == expected
 
@@ -74,7 +75,7 @@ def test_offline_execution_does_not_invoke_network_provider(monkeypatch):
     assert "network_analysis.analyzer" not in calls
 
 
-def test_live_pipeline_passes_chain_to_charan_provider(monkeypatch):
+def test_live_pipeline_passes_eligible_chain_to_network_provider(monkeypatch):
     hop = {
         "index": 0,
         "url": "https://example.com/",

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qr-phishing-shield"
-version = "0.1.0"
+version = "1.0.0"
 description = "Explainable QR URL inspection — Computer Networks course prototype"
 requires-python = ">=3.12"
 dependencies = [
@@ -23,12 +23,16 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.3,<10", "ruff>=0.9,<1"]
 
+[project.scripts]
+qr-phishing-shield = "cli:main"
+qr-shield-evaluate = "evaluation.__main__:main"
+
 [tool.setuptools]
-py-modules = ["pipeline", "demo_cases", "cli"]
+py-modules = ["pipeline", "demo_cases", "cli", "batch", "scan_runner", "report_export"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["shared*", "qr_input*", "url_analysis*", "redirect_analysis*", "network_analysis*", "scoring*"]
+include = ["shared*", "qr_input*", "qr_structure*", "url_analysis*", "redirect_analysis*", "network_analysis*", "scoring*", "evaluation*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

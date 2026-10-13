@@ -1,4 +1,4 @@
-"""Fadhil's orchestration: input, analysis, and explicit teammate boundaries."""
+"""Input-to-evidence orchestration for all four analysis layers."""
 
 from __future__ import annotations
 
@@ -10,17 +10,17 @@ from datetime import UTC, datetime
 from typing import Any
 
 from qr_input import QRInputError, decode_qr
+from qr_structure import analyze_structure
 from redirect_analysis import TracePolicy, trace_redirects
 from shared.contracts import (
     LAYER_WEIGHTS,
     SCHEMA_VERSION,
     error_record,
     layer_result,
-    pending_layer,
     validate_json_value,
     validate_layer_result,
 )
-from url_analysis import URLValidationError, analyze_url, normalize_url
+from url_analysis import URLValidationError, analyze_url, normalize_url, registered_domain
 
 DEFAULT_APPROVED_HOSTS = ("example.com", "www.example.com", "httpbin.org")
 
@@ -36,11 +36,17 @@ def _base_report(kind: str, mode: str) -> dict[str, Any]:
         "layers": {
             "lexical": layer_result(status="unavailable", score=None, evidence_source=source),
             "redirect": layer_result(status="unavailable", score=None, evidence_source=source),
-            "network": pending_layer(
-                "Awaiting Charan's network_analysis.analyzer module.", evidence_source=source
+            "network": layer_result(
+                status="unavailable",
+                score=None,
+                evidence_source=source,
+                observations={"hops": [], "note": "Live network checks were not requested."},
             ),
-            "qr_structure": pending_layer(
-                "Review 3 experimental layer; planned weight 5%.", evidence_source=source
+            "qr_structure": layer_result(
+                status="unavailable",
+                score=None,
+                evidence_source=source,
+                observations={"note": "No QR image was supplied."},
             ),
         },
         "risk": {},
@@ -49,7 +55,7 @@ def _base_report(kind: str, mode: str) -> dict[str, Any]:
 
 
 def _pending_risk(layers: dict[str, dict], note: str) -> dict[str, Any]:
-    """UI state only: no composite score is implemented on Charan's behalf."""
+    """Fail closed if the scoring component cannot produce a valid report."""
     return {
         "score": None,
         "verdict": "insufficient_evidence",
@@ -118,8 +124,15 @@ def _validate_risk(result: Any, layers: dict[str, dict]) -> None:
         "high_risk",
     }:
         raise ValueError("Unsupported verdict from scoring provider.")
-    if result["assessment_status"] not in {"complete_for_r2", "incomplete"}:
+    if result["assessment_status"] not in {
+        "complete",
+        "complete_for_url",
+        "complete_for_r2",
+        "incomplete",
+    }:
         raise ValueError("Unsupported assessment status.")
+    if result["assessment_status"] == "complete" and layers["qr_structure"]["status"] != "complete":
+        raise ValueError("A full assessment requires complete QR structural evidence.")
     if not isinstance(result["layer_contributions"], dict) or any(
         not isinstance(result[field], list)
         for field in ("excluded_layers", "explanations", "limitations")
@@ -149,7 +162,7 @@ def _validate_risk(result: Any, layers: dict[str, dict]) -> None:
         for item in result[field]
     ):
         raise ValueError("Explanations and limitations must be strings.")
-    if result["assessment_status"] == "complete_for_r2":
+    if result["assessment_status"] != "incomplete":
         if score is None:
             raise ValueError("Complete assessments require a score.")
         expected_verdict = (
@@ -161,7 +174,7 @@ def _validate_risk(result: Any, layers: dict[str, dict]) -> None:
         raise ValueError("Incomplete assessments must not offer a risk verdict.")
 
 
-def _finish(report: dict, *, use_network: bool) -> dict:
+def _finish(report: dict, *, use_network: bool, network_options: dict | None = None) -> dict:
     layers = report["layers"]
     hops = [
         hop
@@ -172,7 +185,7 @@ def _finish(report: dict, *, use_network: bool) -> dict:
         try:
             provider = _load_provider("network_analysis.analyzer", "analyze_network")
             if provider is not None and hops:
-                value = provider(deepcopy(hops))
+                value = provider(deepcopy(hops), **(network_options or {}))
                 validate_layer_result(value)
                 if value["evidence_source"] != "live":
                     raise ValueError("Live network provider must identify its evidence as live.")
@@ -197,7 +210,7 @@ def _finish(report: dict, *, use_network: bool) -> dict:
                     )
                 ],
             )
-    note = "Final score pending Charan's scoring.engine.calculate_risk implementation."
+    note = "The scoring component is unavailable."
     report["risk"] = _pending_risk(layers, note)
     try:
         scorer = _load_provider("scoring.engine", "calculate_risk")
@@ -218,11 +231,38 @@ def _finish(report: dict, *, use_network: bool) -> dict:
     return report
 
 
+def _analyze_chain_urls(report: dict) -> None:
+    """Score the most concerning observed URL, including a concealed landing URL."""
+    chain = report["layers"]["redirect"]["observations"].get("hops", [])
+    if not chain or report["layers"]["lexical"]["status"] != "complete":
+        return
+    observations, findings, scores = [], [], []
+    for hop in chain:
+        if not hop.get("url"):
+            continue
+        result = analyze_url(hop["url"])
+        observations.append({"hop_index": hop["index"], **result["observations"]})
+        findings.extend({**item, "hop_index": hop["index"]} for item in result["findings"])
+        if result["score"] is not None:
+            scores.append(result["score"])
+    if scores:
+        layer = report["layers"]["lexical"]
+        layer["score"] = max(scores)
+        layer["findings"] = findings
+        layer["observations"]["hops"] = observations
+        layer["observations"]["aggregation"] = "maximum observed URL score"
+
+
 def analyze_url_input(
     value: str,
     *,
     live: bool = False,
     approved_hosts: tuple[str, ...] = DEFAULT_APPROVED_HOSTS,
+    expected_domain: str | None = None,
+    include_geolocation: bool = False,
+    expected_asns: tuple[int, ...] = (),
+    expected_countries: tuple[str, ...] = (),
+    lexical_model: dict | None = None,
 ) -> dict:
     """Inspect a pasted URL. Offline is the default and makes no network calls."""
     report = _base_report("url", "live" if live else "offline")
@@ -254,7 +294,70 @@ def analyze_url_input(
                 "note": "Offline inspection selected. No HTTP or DNS requests were made.",
             },
         )
-    return _finish(report, use_network=live)
+    _analyze_chain_urls(report)
+    if expected_domain:
+        _compare_destination(report, expected_domain)
+    options = {}
+    if include_geolocation or expected_asns or expected_countries:
+        options = {
+            "include_geolocation": include_geolocation,
+            "expected_asns": expected_asns,
+            "expected_countries": expected_countries,
+        }
+    report = _finish(report, use_network=live, network_options=options)
+    if lexical_model is not None:
+        from evaluation.lexical_model import predict
+
+        try:
+            report["experimental_ml"] = predict(lexical_model, url)
+        except (ValueError, KeyError, TypeError) as exc:
+            report["errors"].append(error_record("LEXICAL_MODEL_INVALID", str(exc)))
+    return report
+
+
+def _compare_destination(report: dict, expected: str) -> None:
+    from urllib.parse import urlsplit
+
+    try:
+        policy = TracePolicy(approved_hosts=(expected,))
+        domain = registered_domain(policy.approved_hosts[0])
+    except ValueError:
+        report["errors"].append(
+            error_record(
+                "INVALID_EXPECTED_DOMAIN",
+                "Expected domain must be an exact hostname, such as paypal.com.",
+            )
+        )
+        return
+    report["input"]["expected_domain"] = domain
+    redirect = report["layers"]["redirect"]
+    hops = redirect["observations"].get("hops", [])
+    if redirect["status"] != "complete" or not hops:
+        redirect["observations"]["brand_comparison"] = (
+            "Final destination unknown; comparison deferred."
+        )
+        return
+    final_domain = registered_domain(urlsplit(hops[-1]["url"]).hostname)
+    redirect["observations"]["brand_comparison"] = {
+        "expected": domain,
+        "observed": final_domain,
+        "matches": domain == final_domain,
+    }
+    if domain != final_domain:
+        redirect["findings"].append(
+            {
+                "code": "EXPECTED_DOMAIN_MISMATCH",
+                "severity": "warning",
+                "message": "The final registered domain differs from the expected domain supplied for this scan. Third-party payment and login services can also cause this.",
+                "hop_index": hops[-1]["index"],
+                "details": {
+                    "expected": domain,
+                    "observed": final_domain,
+                    "score_contribution": 0.35,
+                },
+            }
+        )
+        redirect["score"] = min(1.0, redirect["score"] + 0.35)
 
 
 def analyze_image(
@@ -262,6 +365,7 @@ def analyze_image(
     *,
     live: bool = False,
     approved_hosts: tuple[str, ...] = DEFAULT_APPROVED_HOSTS,
+    **options,
 ) -> dict:
     """Decode a single QR image, then apply the same URL pipeline."""
     try:
@@ -270,10 +374,13 @@ def analyze_image(
         report = _base_report("image", "live" if live else "offline")
         report["errors"].append(error_record(exc.code, str(exc)))
         return _finish(report, use_network=False)
-    report = analyze_url_input(decoded["payload"], live=live, approved_hosts=approved_hosts)
+    report = analyze_url_input(
+        decoded["payload"], live=live, approved_hosts=approved_hosts, **options
+    )
     report["input"]["kind"] = "image"
     report["qr"] = decoded
-    return report
+    report["layers"]["qr_structure"] = analyze_structure(decoded.get("structure"))
+    return _finish(report, use_network=False)
 
 
 def list_demo_cases() -> list[dict]:
@@ -299,6 +406,8 @@ def run_demo(case_id: str) -> dict:
     report["demo"] = {"id": case_id, "title": case["title"], "description": case["description"]}
 
     def replay(url: str, address: str, timeout: float) -> HTTPResponse:
+        if case.get("invalid_tls"):
+            raise OSError("Synthetic TLS certificate validation failure")
         status, location = case["responses"][url]
         return HTTPResponse(status=status, location=location)
 
@@ -309,10 +418,18 @@ def run_demo(case_id: str) -> dict:
         resolver=lambda host, timeout: ["93.184.216.34"],
         transport=replay,
     )
+    from demo_cases import synthetic_network
+
+    report["layers"]["network"] = synthetic_network(
+        case, report["layers"]["redirect"]["observations"]["hops"]
+    )
+    _analyze_chain_urls(report)
+    if case.get("expected_domain"):
+        _compare_destination(report, case["expected_domain"])
     for layer in report["layers"].values():
         layer["evidence_source"] = "synthetic"
     report = _finish(report, use_network=False)
     report["risk"]["limitations"].append(
-        "Demo HTTP responses and resolver addresses are synthetic; no external connections occur. Network/scoring ownership remains with Charan."
+        "Demo HTTP, DNS, TLS, ASN and location observations are explicitly synthetic; no external connections occur."
     )
     return report
