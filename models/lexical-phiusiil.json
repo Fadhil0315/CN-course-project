@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "features": [
+    "length",
+    "digit_fraction",
+    "hyphens",
+    "subdomains",
+    "ip_host",
+    "heuristic",
+    "punycode",
+    "http"
+  ],
+  "weights": [
+    1.2442805256590688,
+    1.0224055661726896,
+    1.382965548120767,
+    -1.1301123711225993,
+    0.012151931312194934,
+    0.03956525801982925,
+    0.008469475093381517,
+    2.7492404548854403
+  ],
+  "bias": -0.7012721473720467,
+  "threshold": 0.4,
+  "training_source": "https://archive.ics.uci.edu/dataset/967/phiusiil+phishing+url+dataset",
+  "training_rows": 7201,
+  "method": "L2-regularized logistic regression; fixed deterministic gradient descent",
+  "test_metrics": {
+    "total": 2445,
+    "assessed": 2445,
+    "abstained": 0,
+    "coverage": 1.0,
+    "true_positive": 1017,
+    "false_positive": 11,
+    "true_negative": 1230,
+    "false_negative": 187,
+    "precision": 0.9892996108949417,
+    "recall_on_assessed": 0.8446843853820598,
+    "recall_all_positives": 0.8446843853820598,
+    "f1_on_assessed": 0.9112903225806451,
+    "accuracy_on_assessed": 0.9190184049079755
+  },
+  "dataset_metadata": {
+    "source": "https://archive.ics.uci.edu/dataset/967/phiusiil+phishing+url+dataset",
+    "citation": "Prasad, A. & Chandra, S. (2024). PhiUSIIL Phishing URL (Website). UCI Machine Learning Repository. DOI: 10.1016/j.cose.2023.103545",
+    "license": "CC BY 4.0",
+    "archive_sha256": "0a639fd03aea6308c5b1c10c92aa23c2ce1505447a9137271865cd0badc9a59a",
+    "sample_rows": 12000,
+    "per_class_requested": 6000,
+    "label_mapping": "project label = 1 - original UCI label",
+    "sample_method": "smallest seeded URL SHA-256 values per class after validation/deduplication",
+    "split_method": "seeded registered-domain SHA-256 bucket: 60% train, 20% validation, 20% test",
+    "counts": {
+      "validation/label-0": 1159,
+      "validation/label-1": 1195,
+      "test/label-0": 1241,
+      "train/label-0": 3600,
+      "train/label-1": 3601,
+      "test/label-1": 1204
+    },
+    "skipped": {
+      "duplicate_url": 1107,
+      "unsupported_or_invalid": 20
+    },
+    "limitations": [
+      "Historical URL dataset; distribution may differ from current QR phishing.",
+      "Balanced sample prevalence is artificial; precision is not a deployment estimate.",
+      "Only URL text is used; no supplied page-derived or label-derived features are used.",
+      "Does not evaluate live DNS/TLS/ASN evidence or the four-layer composite."
+    ]
+  }
+}
